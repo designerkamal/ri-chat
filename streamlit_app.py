@@ -1,6 +1,7 @@
 import streamlit as st
 import os
-from langchain_community.llms import OpenAI
+# from langchain_community.llms import OpenAI
+from langchain_community.chat_models import ChatOpenAI
 from langchain.agents import Tool, initialize_agent
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
@@ -13,7 +14,7 @@ import tempfile
 import math
 
 # Ensure you've set your OpenAI API key in your environment variables
-# os.environ["OPENAI_API_KEY"] = "your-api-key-here"
+os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 # Mortality Score Calculator Function
 def calculate_mortality_score(inputs):
@@ -119,7 +120,7 @@ def initialize_langchain_agent():
         template=lifestyle_template
     )
 
-    lifestyle_chain = LLMChain(llm=OpenAI(model_name="gpt-4", temperature=0.7), prompt=lifestyle_prompt)
+    lifestyle_chain = LLMChain(llm=ChatOpenAI(model_name="gpt-4o", temperature=0.7), prompt=lifestyle_prompt)
 
     lifestyle_tool = Tool(
         name="Lifestyle Advisor",
@@ -131,19 +132,19 @@ def initialize_langchain_agent():
 
     return initialize_agent(
         tools,
-        OpenAI(model_name="gpt-4", temperature=0.5),
+        ChatOpenAI(model_name="gpt-4o", temperature=0.5),
         agent="conversational-react-description",
         verbose=True
     )
 
 # PDF Analysis Function
 def analyze_pdf(pdf_doc, query):
-    chain = load_qa_chain(OpenAI(model_name="gpt-4.o", temperature=0), chain_type="stuff")
+    chain = load_qa_chain(ChatOpenAI(model_name="gpt-4o", temperature=0), chain_type="stuff")
     docs = pdf_doc.similarity_search(query)
     return chain.run(input_documents=docs, question=query)
 
 # Streamlit UI
-st.title("Health Analysis Chatbot (Powered by GPT-4)")
+st.title("Health Analysis Chatbot (Powered by GPT-4o)")
 
 # File upload
 uploaded_file = st.file_uploader("Upload your blood test report (PDF)", type=["pdf"])
@@ -160,15 +161,44 @@ if uploaded_file is not None:
     agent = initialize_langchain_agent()
 
     # Extract health metrics
-    metrics_query = "Extract all relevant health metrics from the blood test report. Provide the results in a dictionary format with metric names as keys and their values."
+    metrics_query = """
+    Extract the following specific health metrics from the blood test report:
+    1. Albumin (g/dL)
+    2. Creatinine (mg/dL)
+    3. Glucose (mg/dL)
+    4. C-reactive Protein (mg/L)
+    5. Lymphocyte (%)
+    6. Mean Cell Volume (fL)
+    7. Red Cell Distribution Width (%)
+    8. Alkaline Phosphatase (U/L)
+    9. White Blood Cell Count (10^3 cells/µL)
+
+    If the age of the patient is mentioned, please include it as well.
+    For each metric, provide the value and the unit of measurement.
+    If any of these metrics are not present in the report, indicate that they are missing.
+    Present the results in a JSON format with metric names as keys and their values (including units) as the corresponding values.
+    """
     metrics_str = analyze_pdf(pdf_doc, metrics_query)
     st.write("Extracted Metrics:", metrics_str)
 
-    # Convert metrics string to dictionary (assuming it's in a valid format)
+    # Parse the metrics string
     try:
-        metrics = eval(metrics_str)
-    except:
-        st.error("Error parsing metrics. Please input values manually.")
+        # Remove any leading/trailing whitespace and extract the JSON part
+        metrics_str = metrics_str.strip()
+        json_match = re.search(r'\{.*\}', metrics_str, re.DOTALL)
+        if json_match:
+            metrics_json = json_match.group()
+            metrics = json.loads(metrics_json)
+        else:
+            raise ValueError("No valid JSON object found in the string")
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing metrics JSON: {e}")
+        metrics = {}
+    except ValueError as e:
+        st.error(f"Error extracting JSON from string: {e}")
+        metrics = {}
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
         metrics = {}
 
     # Manual input for missing values
@@ -177,7 +207,17 @@ if uploaded_file is not None:
     for metric in ['Albumin', 'Creatinine', 'Glucose', 'C-reac Protein', 'Lympocyte', 
                    'Mean Cell Volume', 'Red Cell Dist Width', 'Alkaline Phosphatase', 
                    'White Blood Cells', 'Age']:
-        inputs[metric] = st.text_input(metric, value=metrics.get(metric, ""))
+        # Extract numeric value from metrics string, if present
+        value = ""
+        if metric in metrics:
+            try:
+                # Use regex to extract the numeric part
+                match = re.search(r'(\d+\.?\d*)', metrics[metric])
+                if match:
+                    value = match.group(1)
+            except:
+                pass
+        inputs[metric] = st.text_input(f"{metric} (numeric value only)", value=value)
 
     if st.button("Calculate Scores"):
         # Calculate scores
