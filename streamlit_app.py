@@ -166,9 +166,9 @@ if uploaded_file is not None:
     metrics_query = """
     Extract the following specific health metrics from the blood test report:
     1. Albumin (g/dL)
-    2. Creatinine (mg/dL)
-    3. Glucose (mg/dL)
-    4. C-reactive Protein (mg/L)
+    2. Creatinine (mg/dL) (could also be CREATININE - SERUM )
+    3. Glucose (mg/dL) (could also be AVERAGE BLOOD GLUCOSE (ABG) or FASTING BLOOD SUGAR (FBS))
+    4. C-reactive Protein (mg/L) (could also be CRP or HIGH SENSITIVITY C-REACTIVE PROTEIN (HS-CRP))
     5. Lymphocyte (%)
     6. Mean Cell Volume (fL)
     7. Red Cell Distribution Width (%)
@@ -176,9 +176,24 @@ if uploaded_file is not None:
     9. White Blood Cell Count (10^3 cells/µL)
 
     If the age of the patient is mentioned, please include it as well.
+    Try to match the metrics as closely as possible to the provided names.
     For each metric, provide the value and the unit of measurement.
     If any of these metrics are not present in the report, indicate that they are missing.
-    Present the results in a JSON format with metric names as keys and their values (including units) as the corresponding values.
+    Present the results in a JSON format with metric names as keys and their values (including units) as the corresponding values. Without any markdown annotations
+
+    ## Example JSON output
+    {
+    "Albumin (g/dL)": "3.86 g/dL",
+    "Creatinine (mg/dL)": "0.87 mg/dL",
+    "Glucose (mg/dL)": "108 mg/dL",
+    "C-reactive Protein (mg/L)": "2.9 mg/L",
+    "Lymphocyte (%)": "35.5 %",
+    "Mean Cell Volume (fL)": "90.3 fL",
+    "Red Cell Distribution Width (%)": "15.5 %",
+    "Alkaline Phosphatase (U/L)": "63.2 U/L",
+    "White Blood Cell Count (10^3 cells/µL)": "7.6 X 10³ / µL",
+    "Age": "38 years"
+    }
     """
     metrics_str = analyze_pdf(pdf_doc, metrics_query)
     st.write("Extracted Metrics:", metrics_str)
@@ -203,23 +218,42 @@ if uploaded_file is not None:
         st.error(f"An unexpected error occurred: {e}")
         metrics = {}
 
+    # Mapping between JSON keys and our internal metric names
+    metric_mapping = {
+        'Albumin (g/dL)': 'Albumin',
+        'Creatinine (mg/dL)': 'Creatinine',
+        'Glucose (mg/dL)': 'Glucose',
+        'C-reactive Protein (mg/L)': 'C-reac Protein',
+        'Lymphocyte (%)': 'Lympocyte',
+        'Mean Cell Volume (fL)': 'Mean Cell Volume',
+        'Red Cell Distribution Width (%)': 'Red Cell Dist Width',
+        'Alkaline Phosphatase (U/L)': 'Alkaline Phosphatase',
+        'White Blood Cell Count (10^3 cells/µL)': 'White Blood Cells',
+        'Age': 'Age'
+    }
+
     # Manual input for missing values
     st.write("Please fill in any missing values or correct extracted ones:")
     inputs = {}
-    for metric in ['Albumin', 'Creatinine', 'Glucose', 'C-reac Protein', 'Lympocyte', 
-                   'Mean Cell Volume', 'Red Cell Dist Width', 'Alkaline Phosphatase', 
-                   'White Blood Cells', 'Age']:
+    for json_key, metric in metric_mapping.items():
         # Extract numeric value from metrics string, if present
         value = ""
-        if metric in metrics:
+        if json_key in metrics:
             try:
-                # Use regex to extract the numeric part
-                match = re.search(r'(\d+\.?\d*)', metrics[metric])
+                # Use regex to extract the numeric part, including decimal values
+                match = re.search(r'([-+]?\d*\.\d+|\d+)', metrics[json_key])
                 if match:
                     value = match.group(1)
-            except:
-                pass
+                elif metrics[json_key].lower() == 'missing':
+                    value = ""
+            except Exception as e:
+                st.warning(f"Error extracting value for {metric}: {e}")
         inputs[metric] = st.text_input(f"{metric} (numeric value only)", value=value)
+
+    # Displaying extracted and input values for verification
+    st.write("Extracted and Input Values:")
+    for metric, value in inputs.items():
+        st.write(f"{metric}: {value}")
 
     if st.button("Calculate Scores"):
         # Calculate scores
