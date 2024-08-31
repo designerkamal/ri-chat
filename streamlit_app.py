@@ -1,56 +1,226 @@
 import streamlit as st
-from openai import OpenAI
+import os
+from langchain_community.llms import OpenAI
+from langchain.agents import Tool, initialize_agent
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.embeddings.openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain.chains.question_answering import load_qa_chain
+import tempfile
+import math
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# Ensure you've set your OpenAI API key in your environment variables
+# os.environ["OPENAI_API_KEY"] = "your-api-key-here"
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+# Mortality Score Calculator Function
+def calculate_mortality_score(inputs):
+    # Convert inputs from strings to floats
+    inputs = {k: float(v) for k, v in inputs.items()}
+    
+    # Define conversion factors
+    conv = {
+        'Albumin': 10,
+        'Creatinine': 88.401,
+        'Glucose': 0.0555,
+        'C-reac Protein': 0.1
+    }
+    
+    # Define weights
+    wts = {
+        'Albumin': -0.0336,
+        'Creatinine': 0.0095,
+        'Glucose': 0.1953,
+        'C-reac Protein': 0.0954,
+        'Lympocyte': -0.012,
+        'Mean Cell Volume': 0.0268,
+        'Red Cell Dist Width': 0.3306,
+        'Alkaline Phosphatase': 0.0019,
+        'White Blood Cells': 0.0554,
+        'Age': 0.0804
+    }
+    
+    # Constants
+    gamma = 0.0076927
+    b0 = -19.9067
+    t = 120  # months
+    
+    # Calculate converted inputs
+    cinputs = {k: inputs[k] * conv[k] if k in conv else inputs[k] for k in inputs}
+    
+    # Special case for C-reac Protein: natural log
+    if 'C-reac Protein' in cinputs:
+        cinputs['C-reac Protein'] = math.log(cinputs['C-reac Protein'])
+    
+    # Calculate terms (cinput * weight)
+    terms = {k: cinputs[k] * wts[k] for k in cinputs}
+    
+    # Calculate linear combination, including b0
+    lin_comb = sum(terms.values()) + b0
+    
+    # Calculate MortScore
+    mort_score = 1 - math.exp(-math.exp(lin_comb) * (math.exp(gamma * t) - 1) / gamma)
+    
+    # Calculate Ptypic Age
+    ptypic_age = 141.50225 + math.log(-0.00553 * math.log(1 - mort_score)) / 0.090165
+    
+    # Calculate est. DNAm Age
+    est_dnam_age = ptypic_age / (1 + 1.28047 * math.exp(0.0344329 * (-182.344 + ptypic_age)))
+    
+    # Calculate est. D MScore
+    est_d_mscore = 1 - math.exp(-0.000520363523 * math.exp(0.090165 * est_dnam_age))
+    
+    return lin_comb, mort_score, ptypic_age, est_dnam_age, est_d_mscore
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# Document Processing Function
+@st.cache_resource
+def process_document(_file):
+    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        tmp_file.write(_file.getvalue())
+        tmp_file_path = tmp_file.name
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    loader = PyPDFLoader(tmp_file_path)
+    documents = loader.load()
+    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+    texts = text_splitter.split_documents(documents)
+    embeddings = OpenAIEmbeddings()
+    db = FAISS.from_documents(texts, embeddings)
+    
+    os.unlink(tmp_file_path)
+    return db
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Initialize LangChain agent with GPT-4
+@st.cache_resource
+def initialize_langchain_agent():
+    document_tool = Tool(
+        name="Document Processor",
+        func=process_document,
+        description="Processes and analyzes uploaded blood test reports in PDF format."
+    )
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+    calculator_tool = Tool(
+        name="Mortality Score Calculator",
+        func=calculate_mortality_score,
+        description="Calculates mortality scores based on input health metrics."
+    )
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    lifestyle_template = """
+    Based on the user's health scores and lifestyle information, provide personalized advice:
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    Health Scores: {scores}
+    Lifestyle Info: {lifestyle}
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    Advice:
+    """
+    lifestyle_prompt = PromptTemplate(
+        input_variables=["scores", "lifestyle"],
+        template=lifestyle_template
+    )
+
+    lifestyle_chain = LLMChain(llm=OpenAI(model_name="gpt-4", temperature=0.7), prompt=lifestyle_prompt)
+
+    lifestyle_tool = Tool(
+        name="Lifestyle Advisor",
+        func=lifestyle_chain.run,
+        description="Provides personalized lifestyle advice based on health scores and current habits."
+    )
+
+    tools = [document_tool, calculator_tool, lifestyle_tool]
+
+    return initialize_agent(
+        tools,
+        OpenAI(model_name="gpt-4", temperature=0.5),
+        agent="conversational-react-description",
+        verbose=True
+    )
+
+# PDF Analysis Function
+def analyze_pdf(pdf_doc, query):
+    chain = load_qa_chain(OpenAI(model_name="gpt-4.o", temperature=0), chain_type="stuff")
+    docs = pdf_doc.similarity_search(query)
+    return chain.run(input_documents=docs, question=query)
+
+# Streamlit UI
+st.title("Health Analysis Chatbot (Powered by GPT-4)")
+
+# File upload
+uploaded_file = st.file_uploader("Upload your blood test report (PDF)", type=["pdf"])
+
+if uploaded_file is not None:
+    st.write("File uploaded successfully!")
+    
+    # Process document
+    with st.spinner("Processing document..."):
+        pdf_doc = process_document(uploaded_file)
+    st.success("Document processed!")
+
+    # Initialize agent
+    agent = initialize_langchain_agent()
+
+    # Extract health metrics
+    metrics_query = "Extract all relevant health metrics from the blood test report. Provide the results in a dictionary format with metric names as keys and their values."
+    metrics_str = analyze_pdf(pdf_doc, metrics_query)
+    st.write("Extracted Metrics:", metrics_str)
+
+    # Convert metrics string to dictionary (assuming it's in a valid format)
+    try:
+        metrics = eval(metrics_str)
+    except:
+        st.error("Error parsing metrics. Please input values manually.")
+        metrics = {}
+
+    # Manual input for missing values
+    st.write("Please fill in any missing values or correct extracted ones:")
+    inputs = {}
+    for metric in ['Albumin', 'Creatinine', 'Glucose', 'C-reac Protein', 'Lympocyte', 
+                   'Mean Cell Volume', 'Red Cell Dist Width', 'Alkaline Phosphatase', 
+                   'White Blood Cells', 'Age']:
+        inputs[metric] = st.text_input(metric, value=metrics.get(metric, ""))
+
+    if st.button("Calculate Scores"):
+        # Calculate scores
+        lin_comb, mort_score, ptypic_age, est_dnam_age, est_d_mscore = calculate_mortality_score(inputs)
+        
+        # Display results
+        st.write("Results:")
+        st.write(f"LinComb: {lin_comb:.2f}")
+        st.write(f"MortScore: {mort_score:.6f}")
+        st.write(f"Ptypic Age: {ptypic_age:.2f}")
+        st.write(f"est. DNAm Age: {est_dnam_age:.2f}")
+        st.write(f"est. D MScore: {est_d_mscore:.6f}")
+
+        # Interpret results
+        interpretation_query = f"""
+        Interpret these health scores in detail:
+        LinComb={lin_comb:.2f}, MortScore={mort_score:.6f}, Ptypic Age={ptypic_age:.2f},
+        est. DNAm Age={est_dnam_age:.2f}, est. D MScore={est_d_mscore:.6f}
+        Explain what each score means and its implications for the person's health.
+        """
+        interpretation = analyze_pdf(pdf_doc, interpretation_query)
+        st.write("Interpretation:", interpretation)
+
+    # Lifestyle assessment
+    lifestyle = st.text_area("Please describe your current lifestyle habits (diet, exercise, sleep, etc.):")
+    
+    if st.button("Get Lifestyle Advice"):
+        # Provide recommendations
+        scores = f"LinComb={lin_comb:.2f}, MortScore={mort_score:.6f}, Ptypic Age={ptypic_age:.2f}, est. DNAm Age={est_dnam_age:.2f}, est. D MScore={est_d_mscore:.6f}"
+        advice_query = f"""
+        Based on these health scores: {scores}
+        And this lifestyle description: {lifestyle}
+        Provide detailed, personalized lifestyle advice to improve health outcomes.
+        Include specific recommendations for diet, exercise, sleep, and stress management.
+        """
+        advice = analyze_pdf(pdf_doc, advice_query)
+        st.write("Lifestyle Advice:", advice)
+
+    # Chat interface
+    st.write("Ask any questions about your health analysis:")
+    user_question = st.text_input("Your question")
+    if user_question:
+        response = analyze_pdf(pdf_doc, user_question)
+        st.write("Response:", response)
+
+st.write("Note: This chatbot provides general information and should not be considered as a substitute for professional medical advice.")
